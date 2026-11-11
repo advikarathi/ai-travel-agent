@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0c2f2e">
+  <title>Lark — the trip desk</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,620;1,9..144,500;1,9..144,650&family=IBM+Plex+Mono:wght@400;500&family=Outfit:wght@360;480;580&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect fill='%230c2f2e' width='48' height='48' rx='10'/%3E%3Cpath fill='%23f3d27a' d='M8 30c8-2 12-10 16-18 2 7 8 14 16 16-8 2-12 8-16 14-2-6-8-10-16-12z'/%3E%3C/svg%3E">
+</head>
+<body data-pane="desk">
+  <header class="top">
+    <div class="brand">
+      <svg class="bird" viewBox="0 0 48 48" aria-hidden="true">
+        <path d="M6 30c8-2 14-10 18-18 2 6 8 14 18 16-8 2-14 8-18 14-2-6-8-10-18-12z"/>
+      </svg>
+      <div>
+        <p class="word">Lark</p>
+        <p class="tag">Three scouts. One budget.</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button type="button" class="ghost" id="new-trip">New trip</button>
+      <button type="button" class="ghost passport-btn" id="open-passport">
+        Passport <span id="stamp-count">0</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="mobile-tabs" role="tablist">
+    <button type="button" data-pane="desk" class="is-on">Desk</button>
+    <button type="button" data-pane="trip">Trip</button>
+  </div>
+
+  <main class="workspace">
+    <section class="desk" aria-label="Conversation with Lark">
+      <div class="thread" id="thread" aria-live="polite"></div>
+      <form class="composer" id="composer">
+        <div class="chips" id="chips"></div>
+        <div class="entry">
+          <label class="sr" for="say">Tell Lark the trip</label>
+          <textarea id="say" rows="2" placeholder="Boston to Lisbon, five nights in June, $3200"></textarea>
+          <button type="submit" class="send" id="send">Go</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="trip" id="trip" aria-label="Trip docket">
+      <div class="poster">
+        <p class="poster-kicker">A desk, not a search box</p>
+        <h2>Name a city.<br>Name a number.<br>I'll do the rest.</h2>
+        <p class="poster-copy">Wing hunts flights. Hearth finds a hotel, a guesthouse, or an apartment. Wander fills the days. Nobody leaves the desk until the budget is written down.</p>
+        <div class="scout-fan">
+          <article class="scout-card wing">
+            <p class="kicker">01 — Wing</p>
+            <h3>Flights</h3>
+            <p>Seats that survive the number, not just the prettiest departure.</p>
+          </article>
+          <article class="scout-card hearth">
+            <p class="kicker">02 — Hearth</p>
+            <h3>A bed</h3>
+            <p>Hotels, riads, apartments. A place to leave your bag.</p>
+          </article>
+          <article class="scout-card wander">
+            <p class="kicker">03 — Wander</p>
+            <h3>The days</h3>
+            <p>Meals, walks, the one ticket worth standing in line for.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <aside class="passport" id="passport" hidden>
+    <div class="passport-card">
+      <div class="passport-head">
+        <div>
+          <p class="kicker">Passport</p>
+          <h2>Stamps</h2>
+        </div>
+        <button type="button" class="ghost dark" id="close-passport">Close</button>
+      </div>
+      <div id="passport-list"></div>
+    </div>
+  </aside>
+  <script src="/static/app.js"></script>
+</body>
+</html>
