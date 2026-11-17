@@ -12,8 +12,10 @@ choice, so every dollar amount comes from the inventory, never the model.
 
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 
+from lark import extras
 from lark.catalog import ALIASES, CITIES, ORIGINS, destination
 from lark.llm import LLMBadOutput, get_llm
 from lark.parse import (
@@ -26,7 +28,7 @@ from lark.parse import (
     suggestions_for,
     update_state,
 )
-from lark.plan import activity_cost, build_days, build_plan, diagnosis, scout_lines
+from lark.plan import activity_cost, build_days, build_plan, destination_candidates, diagnosis, scout_lines
 
 PREFERENCES = {"balanced", "cheaper", "nicer_stay", "more_play"}
 
@@ -47,7 +49,11 @@ Return exactly these keys:
   "per_person": true if the budget is per person
   "travelers": integer head count, or null. "couple"/"two of us" = 2, "solo" = 1
   "vibes": list drawn only from vibe_options, [] if none
-  "preference": one of "cheaper", "nicer_stay", "more_play", "balanced", or null if unchanged"""
+  "preference": one of "cheaper", "nicer_stay", "more_play", "balanced", or null if unchanged
+  "intent": "question" if has_plan is true and the message only asks something about that trip
+            (packing, weather, timing, why a choice was made) without asking to change it;
+            otherwise "plan"
+"""
 
 PLAN_SYSTEM = """You are the planner of Lark, a budget-first trip desk.
 Pick ONE flight, ONE stay, and the activities that best fit the traveler's budget and vibes,
@@ -65,8 +71,33 @@ Return exactly these keys:
           {"title": short theme for the day, "activity_ids": ids from your activity_ids,
            "note": one sentence of free-time advice (no new paid bookings, no prices)}
           Use every chosen activity exactly once. Keep the last day light.
+          If weather is given, put outdoor activities on dry days and museums, food and
+          indoor picks on wet ones, and mention the weather in that day's note.
+          Respect profile when given: pace "relaxed" = at most one paid activity a day,
+          "packed" = fill the days; walking "minimal" = skip walking-heavy picks;
+          diet = suit food picks and notes to it.
   "tradeoffs": 2-4 plain sentences on what you traded and why (e.g. cheaper flight vs better
                room, which vibe got the most time, what was left out). Quote only prices from options."""
+
+DESTINATION_SYSTEM = """You are the destination desk of Lark, a budget-first trip planner.
+The traveler has not picked a city. Each candidate is already priced for their exact party,
+dates and nights on Lark's estimates. Choose the ONE city that best fits: it should fit the
+budget if any city does; then weigh season ("best" beats "okay" beats "tough") and how many
+activities match their vibes. Avoid previous_pick unless it is clearly the best fit.
+
+Return exactly these keys:
+  "slug": the chosen candidate's slug
+  "why": 2-3 plain sentences on why this city, quoting only estimated totals from candidates
+  "runner_up": another candidate's slug, or null"""
+
+ANSWER_SYSTEM = """You are Lark, a budget-first trip planner. The traveler already has the plan below
+and is asking a question about it. Answer from the plan (flight, stay, days, budget, weather,
+profile) plus general travel knowledge. Use 2-5 short, specific sentences in plain words.
+Quote only prices that appear in the plan; never invent prices, opening hours or bookings.
+If they really want the plan changed, say what to type (for example "make it cheaper").
+
+Return exactly one key:
+  "answer": your answer as plain text"""
 
 
 def _place_slug(name: object) -> str | None:
@@ -106,8 +137,8 @@ def _trip_summary(state: dict) -> dict:
     }
 
 
-def extract_with_llm(llm, message: str, before: dict, state: dict, today: date) -> None:
-    """Ask the model for trip fields and lay them over the rule-based parse."""
+def extract_with_llm(llm, message: str, before: dict, state: dict, today: date, has_plan: bool = False) -> dict:
+    """Ask the model for trip fields and lay them over the rule-based parse. Returns the raw fields."""
     fields = llm.chat_json(
         "extract",
         EXTRACT_SYSTEM,
@@ -117,8 +148,11 @@ def extract_with_llm(llm, message: str, before: dict, state: dict, today: date) 
             "trip_so_far": _trip_summary(before),
             "known_destinations": [city["name"] for city in CITIES.values()],
             "vibe_options": sorted(VIBE_WORDS),
+            "has_plan": has_plan,
         },
     )
+    if fields.get("intent") == "question" and has_plan:
+        return fields  # a question about the trip: leave the trip as it is
 
     origin_slug = _place_slug(fields.get("origin"))
     if origin_slug and origin_slug in ORIGINS:
@@ -184,6 +218,7 @@ def extract_with_llm(llm, message: str, before: dict, state: dict, today: date) 
     if state["origin"] and state["origin"] == state["destination"]:
         state["unsupported"] = "the same city twice"
         state["destination"] = None
+    return fields
 
 
 def _activity_options(plan: dict, state: dict) -> list[dict]:
@@ -225,8 +260,14 @@ def plan_with_llm(llm, state: dict, plan: dict) -> dict:
                 "meals": plan["meals"],
                 "vibes": state.get("vibes") or [],
                 "preference": state.get("preference") or "balanced",
+                "profile": state.get("profile") or {},
             },
             "dates": dates,
+            "weather": [
+                {"date": day["date"], "summary": day["summary"], "high_f": day["high"], "low_f": day["low"], "wet": day["wet"]}
+                for day in plan.get("weather") or []
+            ],
+            "weather_kind": (plan.get("weather") or [{}])[0].get("kind"),
             "options": {
                 "flights": [
                     {key: flight[key] for key in ("id", "carrier", "via", "duration", "depart_time", "price")}
@@ -323,6 +364,76 @@ def plan_with_llm(llm, state: dict, plan: dict) -> dict:
     return plan
 
 
+def choose_destination_with_llm(llm, state: dict, candidates: list[dict]) -> tuple[str, str, str | None]:
+    """The model picks the city from priced candidates. Returns (slug, why, runner_up)."""
+    pick = llm.chat_json(
+        "destination",
+        DESTINATION_SYSTEM,
+        {
+            "trip": {
+                "from": ORIGINS[state["origin"]]["name"] if state.get("origin") in ORIGINS else None,
+                "depart": state.get("depart"),
+                "nights": state.get("nights"),
+                "travelers": state.get("travelers"),
+                "budget": state.get("budget"),
+                "vibes": state.get("vibes") or [],
+                "profile": state.get("profile") or {},
+            },
+            "previous_pick": state.get("last_surprise"),
+            "candidates": [{key: value for key, value in row.items() if key != "country"} for row in candidates],
+        },
+    )
+    slugs = [row["slug"] for row in candidates]
+    if pick.get("slug") not in slugs:
+        raise LLMBadOutput("The model picked a city that isn't a candidate.")
+    runner = pick.get("runner_up") if pick.get("runner_up") in slugs and pick.get("runner_up") != pick["slug"] else None
+    why = pick.get("why") or ""
+    if isinstance(why, (list, tuple)):
+        why = " ".join(str(part).strip() for part in why)
+    return pick["slug"], str(why).strip(), runner
+
+
+def plan_brief(plan: dict, state: dict) -> dict:
+    """What the model needs to answer questions about a plan."""
+    flight = plan["flights"][plan["flight_index"]]
+    stay = plan["stays"][plan["stay_index"]]
+    return {
+        "from": plan["origin"],
+        "to": f"{plan['city']}, {plan['country']}",
+        "dates": f"{plan['depart_label']} to {plan['ret_label']} ({plan['nights']} nights)",
+        "travelers": plan["travelers"],
+        "budget": plan["budget"],
+        "estimated_total": plan["total"],
+        "left_over": plan["pocket"],
+        "flight": {k: flight.get(k) for k in ("carrier", "via", "duration", "depart_time", "arrive_time", "price")},
+        "flight_price_source": (plan.get("sources") or {}).get("flights"),
+        "stay": {k: stay.get(k) for k in ("name", "area", "style", "rating", "nightly", "total")},
+        "meals": plan["meals"],
+        "activities": [{k: a.get(k) for k in ("name", "area", "cost", "note")} for a in plan["activities"]],
+        "days": [{"day": d["label"], "title": d["title"], "items": d["items"]} for d in plan["days"]],
+        "weather": plan.get("weather") or [],
+        "season": plan.get("season"),
+        "profile": state.get("profile") or {},
+        "why_this_plan": plan.get("tradeoffs"),
+    }
+
+
+def answer_question(llm, question: str, plan: dict, state: dict) -> str:
+    reply = llm.chat_json("answer", ANSWER_SYSTEM, {"question": question, "plan": plan_brief(plan, state)})
+    answer = reply.get("answer")
+    if isinstance(answer, (list, tuple)):
+        answer = " ".join(str(part) for part in answer)
+    answer = str(answer or "").strip()
+    if not answer:
+        raise LLMBadOutput("The model returned an empty answer.")
+    return answer
+
+
+def _looks_like_question(text: str) -> bool:
+    text = text.strip().lower()
+    return text.endswith("?") or bool(re.match(r"^(what|why|how|when|which|is|are|do|does|should|can|will)\b", text))
+
+
 def narrate(state: dict, plan: dict) -> str:
     city = plan["city"]
     budget = f"${plan['budget']:,}"
@@ -343,7 +454,7 @@ def narrate(state: dict, plan: dict) -> str:
     if plan.get("assumed_party"):
         line += " I planned this for one person."
     if state.get("_surprised"):
-        line = f"I picked {city}. " + line
+        line = f"You asked me to choose, so I picked {city}. " + line
     sources = plan.get("sources") or {}
     if sources.get("flights") == "google":
         line += " The flight price is live from Google Flights; hotel and activity prices are estimates."
@@ -352,20 +463,35 @@ def narrate(state: dict, plan: dict) -> str:
     return line
 
 
-def respond(message: str, state: dict | None = None, today: date | None = None) -> dict:
-    """One turn of the desk. Raises lark.llm.LLMError subclasses the UI should show."""
+def respond(
+    message: str, state: dict | None = None, today: date | None = None, current_plan: dict | None = None
+) -> dict:
+    """One turn of the desk. Raises lark.llm.LLMError subclasses the UI should show.
+
+    current_plan: the plan already on screen, so questions about it can be answered.
+    """
     llm = get_llm()
     today = today or date.today()
     current = fresh_state(state)
     before = dict(current)
     notes: list[str] = []
     text = message or ""
+    fields: dict = {}
     update_state(current, text, today)
     if text.strip():
         try:
-            extract_with_llm(llm, text, before, current, today)
+            fields = extract_with_llm(llm, text, before, current, today, has_plan=bool(current_plan))
         except LLMBadOutput:
             notes.append("The model's reading of that message was unusable, so I parsed it by rule.")
+
+    # A question about the trip on screen: answer it, change nothing.
+    unchanged = all(current.get(k) == before.get(k) for k in ("destination", "budget", "nights", "depart", "travelers", "origin", "preference"))
+    if current_plan and text.strip() and (fields.get("intent") == "question" or (not fields and unchanged and _looks_like_question(text))):
+        try:
+            answer = answer_question(llm, text, current_plan, before)
+        except LLMBadOutput:
+            answer = "I couldn't put together an answer to that. Try asking it another way."
+        return {"reply": answer, "state": fresh_state(before), "plan": None, "suggestions": [], "status": "answered", "notes": notes}
 
     question = next_question(current)
     if question:
@@ -379,7 +505,31 @@ def respond(message: str, state: dict | None = None, today: date | None = None) 
         }
 
     surprised = bool(current.get("surprise") and not current.get("destination"))
+    pick_note = None
+    if surprised:
+        # Same set-up build_plan does, so every city is priced for this exact trip.
+        if current.get("travelers") is None:
+            current["travelers"] = 1
+            current["assumed_party"] = True
+        if not current.get("ret"):
+            current["ret"] = (date.fromisoformat(current["depart"]) + timedelta(days=int(current["nights"]))).isoformat()
+        candidates = destination_candidates(current)
+        try:
+            slug, why, runner = choose_destination_with_llm(llm, current, candidates)
+            current.update(destination=slug, last_surprise=slug, surprise=False)
+            pick_note = {"by": "llm", "why": why, "runner_up": CITIES[runner]["name"] if runner else None}
+        except LLMBadOutput:
+            pick_note = {"by": "rules", "why": "I compared every city on estimated prices and picked the best fit by rule.", "runner_up": None}
+        pick_note["compared"] = [
+            {"city": row["city"], "estimated_total": row["estimated_total"], "fits": row["fits"], "season": row["season"]}
+            for row in candidates
+        ]
     plan = build_plan(current)
+    city = destination(current["destination"])
+    plan["lat"], plan["lon"] = city["lat"], city["lon"]
+    plan["weather"] = extras.weather(city["lat"], city["lon"], plan["depart"], plan["nights"], today=today)
+    if pick_note:
+        plan["destination_pick"] = pick_note
     current["_surprised"] = surprised
     try:
         plan = plan_with_llm(llm, current, plan)
@@ -400,4 +550,3 @@ def respond(message: str, state: dict | None = None, today: date | None = None) 
         "status": "ready",
         "notes": notes,
     }
-

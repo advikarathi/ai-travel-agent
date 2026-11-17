@@ -19,11 +19,20 @@ class FakeLLM:
         self.calls: list[tuple[str, dict]] = []
         self.extract_override: dict | None = None
         self.plan_override: dict | None = None
+        self.destination_override: dict | None = None
 
     def chat_json(self, task: str, system: str, payload: dict) -> dict:
         self.calls.append((task, payload))
         if task == "extract":
             return dict(self.extract_override or {})
+        if task == "destination":
+            if self.destination_override is not None:
+                return dict(self.destination_override)
+            fitting = [c for c in payload["candidates"] if c["fits"]] or payload["candidates"]
+            best = max(fitting, key=lambda c: (c["season"] == "best", c["vibe_matches"], -c["estimated_total"]))
+            return {"slug": best["slug"], "why": f"{best['city']} fits at ${best['estimated_total']:,}.", "runner_up": None}
+        if task == "answer":
+            return {"answer": f"About {payload['plan']['to']}: {payload['question']}"}
         if self.plan_override is not None:
             return dict(self.plan_override)
         options = payload["options"]
@@ -60,3 +69,11 @@ def no_live_prices(monkeypatch):
     import lark.live
 
     monkeypatch.setattr(lark.live, "_fetch", lambda *args: None)
+
+
+@pytest.fixture(autouse=True)
+def no_free_extras(monkeypatch):
+    """Tests never call Open-Meteo or Wikipedia."""
+    import lark.extras
+
+    monkeypatch.setattr(lark.extras, "_get_json", lambda *args, **kwargs: None)

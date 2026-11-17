@@ -335,16 +335,17 @@ def docket_number(state: dict, budget: int) -> str:
     return f"LK-{number}"
 
 
-def assemble(state: dict) -> dict:
+def assemble(state: dict, live_prices: bool = True) -> dict:
+    """Price the trip. live_prices=False uses only desk estimates (no network), for comparing cities."""
     dest = destination(state["destination"])
     orig = origin(state["origin"])
     travelers = int(state["travelers"])
     nights = int(state["nights"])
     budget = int(total_budget(state) or 0)
     month = date.fromisoformat(state["depart"]).month
-    # Real Google Flights and Google Hotels prices when SERPAPI_KEY is set; desk estimates otherwise.
-    live_flights = live.flights(orig, dest, state["depart"], state["ret"], travelers)
-    live_stays = live.stays(dest, state["depart"], state["ret"], nights, travelers)
+    # Live Google Flights fares when they answer; desk estimates otherwise.
+    live_flights = live.flights(orig, dest, state["depart"], state["ret"], travelers) if live_prices else None
+    live_stays = live.stays(dest, state["depart"], state["ret"], nights, travelers) if live_prices else None
     built_flights = live_flights or flight_options(orig, dest, month, travelers)
     built_stays = live_stays or stay_options(dest, nights, travelers)
     rate = meal_rate(state)
@@ -411,7 +412,7 @@ def pick_surprise(state: dict) -> None:
         trial = dict(state)
         trial["destination"] = slug
         trial["vibes"] = list(state.get("vibes") or [])
-        plan = assemble(trial)
+        plan = assemble(trial, live_prices=False)
         quality = plan["stays"][plan["stay_index"]]["rating"]
         score = (1 if plan["fits"] else 0) * 100 + quality * 10 + min(len(plan["activities"]), 4)
         if slug == last:
@@ -422,6 +423,45 @@ def pick_surprise(state: dict) -> None:
     state["destination"] = best_slug
     state["last_surprise"] = best_slug
     state["surprise"] = False
+
+
+def destination_candidates(state: dict) -> list[dict]:
+    """Every city priced for this trip on desk estimates, for choosing where to go."""
+    vibes = set(state.get("vibes") or [])
+    month = date.fromisoformat(state["depart"]).month
+    rows = []
+    for slug, city in CITIES.items():
+        if slug == state.get("origin"):
+            continue
+        trial = dict(state)
+        trial["destination"] = slug
+        trial["vibes"] = list(vibes)
+        plan = assemble(trial, live_prices=False)
+        stay = plan["stays"][plan["stay_index"]]
+        if month in city["best_months"]:
+            season = "best"
+        elif month in city["tough_months"]:
+            season = "tough"
+        else:
+            season = "okay"
+        tags = [tag for activity in city["activities"] for tag in activity["tags"]]
+        rows.append(
+            {
+                "slug": slug,
+                "city": city["name"],
+                "country": city["country"],
+                "estimated_total": plan["total"],
+                "fits": plan["fits"],
+                "left_over": plan["pocket"],
+                "season": season,
+                "season_note": plan["season"],
+                "stay": f"{stay['name']} ({stay['style']}, {stay['rating']})",
+                "vibe_matches": sum(1 for tag in tags if tag in vibes),
+                "highlights": [activity["name"] for activity in city["activities"][:4]],
+            }
+        )
+    rows.sort(key=lambda row: (not row["fits"], row["estimated_total"]))
+    return rows
 
 
 def build_plan(state: dict) -> dict:

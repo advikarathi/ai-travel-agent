@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 import streamlit as st
 
-from lark import look
+from lark import export, extras, look
 from lark.agent import respond
 from lark.llm import LLMError, LLMRateLimited, is_configured, settings
 from lark.parse import VIBE_WORDS
@@ -18,9 +18,14 @@ st.set_page_config(page_title="Lark", page_icon=":material/flight_takeoff:", lay
 
 STARTERS = [
     "Two of us, Boston to Lisbon, 5 nights in June, $3200",
+    "Where can we go from Boston for $2,500 in April? Two of us, 5 nights, food",
     "Solo from Chicago, a weekend in New Orleans, under $900",
     "From San Francisco to Tokyo in April, 6 nights, two people, food first, $4500",
 ]
+
+PACES = ["Relaxed", "Balanced", "Packed"]
+WALKING = ["Lots", "Some", "Minimal"]
+DIETS = ["No restrictions", "Vegetarian", "Vegan", "Halal", "Kosher", "Gluten-free"]
 
 # ---- session state, all in one place ---------------------------------------
 if "messages" not in st.session_state:
@@ -63,11 +68,16 @@ with st.sidebar:
     )
     st.number_input("Travelers", min_value=1, max_value=9, step=1, value=None, key="sb_travelers", placeholder="e.g. 2")
     st.pills("Vibe", sorted(VIBE_WORDS), selection_mode="multi", key="sb_vibes")
+    with st.expander("About you", icon=":material/person:"):
+        st.segmented_control("Pace", PACES, default="Balanced", key="sb_pace")
+        st.segmented_control("Walking", WALKING, default="Some", key="sb_walking")
+        st.selectbox("Food", DIETS, key="sb_diet")
+        st.caption("Lark plans the days around these. Press Update plan after changing them.")
     replan = st.button("Update plan", icon=":material/refresh:", width="stretch", type="primary")
     if st.button("Start over", icon=":material/restart_alt:", width="stretch"):
         for key in ("messages", "lark_state", "suggestions", "applied", "retry", "sync"):
             st.session_state.pop(key, None)
-        for key in ("sb_budget", "sb_dates", "sb_travelers", "sb_vibes"):
+        for key in ("sb_budget", "sb_dates", "sb_travelers", "sb_vibes", "sb_pace", "sb_walking", "sb_diet"):
             st.session_state.pop(key, None)
         st.rerun()
     st.divider()
@@ -106,14 +116,32 @@ def merge_sidebar(state: dict | None) -> dict:
     if "vibes" in changed:
         state["vibes"] = list(changed["vibes"])
     st.session_state.applied = values
+    # The profile always rides along; only what differs from the defaults is sent.
+    profile = {
+        "pace": (st.session_state.get("sb_pace") or "Balanced").lower(),
+        "walking": (st.session_state.get("sb_walking") or "Some").lower(),
+        "diet": (st.session_state.get("sb_diet") or DIETS[0]).lower(),
+    }
+    state["profile"] = {k: v for k, v in profile.items() if v not in ("balanced", "some", "no restrictions")}
     return state
+
+
+def last_plan() -> dict | None:
+    for msg in reversed(st.session_state.messages):
+        if msg.get("plan"):
+            return msg["plan"]
+    return None
 
 
 def run_turn(message: str) -> None:
     state = merge_sidebar(st.session_state.lark_state)
     try:
-        with st.spinner("Lark is checking flights, stays and things to do against your budget..."):
-            result = respond(message, state)
+        with st.spinner("Lark is checking flights, weather, stays and things to do against your budget..."):
+            result = respond(message, state, current_plan=last_plan())
+            if result["plan"]:
+                plan = result["plan"]
+                # Photos and map points from Wikipedia; cached, skipped if slow or offline.
+                plan["extras"] = extras.enrich(plan, plan["lat"], plan["lon"])
     except LLMRateLimited as error:
         st.session_state.retry = message
         st.session_state.messages.append({"role": "assistant", "content": f":orange[{error}]", "error": True})
@@ -123,7 +151,9 @@ def run_turn(message: str) -> None:
         return
     st.session_state.retry = None
     st.session_state.lark_state = result["state"]
-    st.session_state.suggestions = result["suggestions"]
+    st.session_state.suggestions = result["suggestions"] or st.session_state.suggestions
+    if result["plan"]:
+        st.session_state.suggestions = result["suggestions"] + ["What should I pack?", "Is this too rushed?"]
     plan = result["plan"]
     st.session_state.messages.append(
         {"role": "assistant", "content": result["reply"], "plan": plan, "notes": result.get("notes") or []}
@@ -143,19 +173,49 @@ def html(markup: str) -> None:
     st.markdown(flat, unsafe_allow_html=True)
 
 
+def day_map(plan: dict, day: dict) -> None:
+    places = (plan.get("extras") or {}).get("places") or {}
+    points = [
+        {"lat": places[item]["lat"], "lon": places[item]["lon"], "name": item}
+        for item in day["items"]
+        if item in places
+    ]
+    if points:
+        st.map(points, latitude="lat", longitude="lon", size=60, color="#E0483E", zoom=11, height=260)
+        if any(places[p["name"]].get("approximate") for p in points):
+            st.caption("Some pins mark the neighbourhood, not the exact spot.")
+
+
 def show_plan(plan: dict, index: int) -> None:
     flight = plan["flights"][plan["flight_index"]]
     stay = plan["stays"][plan["stay_index"]]
+    found = plan.get("extras") or {}
+    html(look.passport(plan))
     html(look.boarding_pass(plan, flight))
     html(look.luggage_tag(plan, flight, stay))
-    html(look.sticky_note(plan))
+    note, photo = look.sticky_note(plan), look.polaroid(plan["city"], found.get("city_photo"))
+    if note and photo:
+        left, right = st.columns([3, 2])
+        with left:
+            html(note)
+        with right:
+            html(photo)
+    else:
+        html(note or photo)
     html(look.postcard(plan, stay))
 
     st.subheader("Your days")
+    weather = plan.get("weather") or []
+    if weather and weather[0].get("kind") == "last_year":
+        st.caption("Too far out for a forecast, so each day shows last year's weather on the same date (Open-Meteo).")
+    elif weather:
+        st.caption("Forecast from Open-Meteo. Lark put the indoor plans on the wetter days.")
     tabs = st.tabs([day["label"] for day in plan["days"]])
-    for tab, day in zip(tabs, plan["days"]):
+    for offset, (tab, day) in enumerate(zip(tabs, plan["days"])):
         with tab:
-            html(look.day_route(plan, day))
+            sky = weather[offset] if offset < len(weather) else None
+            html(look.day_route(plan, day, sky, found.get("places")))
+            day_map(plan, day)
 
     with st.expander("Other flights and stays Lark compared"):
         st.dataframe(
@@ -177,6 +237,15 @@ def show_plan(plan: dict, index: int) -> None:
         if st.button("Save trip", key=f"save_{index}", icon=":material/bookmark_add:", type="primary"):
             save_trip(plan)  # the Saved trips list below is drawn after this, so it's current
             st.toast(f"Saved {plan['city']} to {SAVED_TRIPS.name}", icon=":material/check:")
+        name = f"lark-{plan['city'].lower().replace(' ', '-')}-{plan['depart']}"
+        st.download_button(
+            "Download PDF", export.to_pdf(plan), f"{name}.pdf", "application/pdf",
+            key=f"pdf_{index}", icon=":material/picture_as_pdf:", on_click="ignore",
+        )
+        st.download_button(
+            "Add to calendar", export.to_ics(plan), f"{name}.ics", "text/calendar",
+            key=f"ics_{index}", icon=":material/calendar_add_on:", on_click="ignore",
+        )
         picked = "the LLM" if plan.get("chosen_by") == "llm" else "Lark's rules"
         sources = plan.get("sources") or {}
         if sources.get("flights") == "google":

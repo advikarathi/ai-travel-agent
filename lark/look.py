@@ -115,6 +115,29 @@ h1, h2, h3 {{ font-family: 'Bricolage Grotesque', system-ui, sans-serif !importa
 .lk-stop .lk-area {{ color: {MUTED}; }}
 .lk-stop p {{ margin: 2px 0 4px; color: {MUTED}; }}
 .lk-fine {{ color: {MUTED}; font-size: .88rem; }}
+.lk-stop-photo {{ float: right; width: 116px; height: 84px; object-fit: cover; border-radius: 6px; margin: 2px 0 6px 14px; box-shadow: 0 4px 10px rgba(19,41,75,.15); }}
+.lk-stop::after {{ content: ""; display: block; clear: both; }}
+.lk-sky {{ display: inline-block; background: #FFFFFF; border: 1.5px solid #D3E1EE; border-radius: 999px; padding: 4px 12px; margin: 0 0 12px; font-size: .92rem; }}
+.lk-sky.lk-wet {{ border-color: {BLUE}; background: #EEF4FC; }}
+
+/* polaroid */
+.lk-polaroid {{ background: #FFFFFF; padding: 12px 12px 14px; box-shadow: 0 10px 24px rgba(19,41,75,.16); transform: rotate(1.6deg); margin: 10px 8px 22px; }}
+.lk-polaroid img {{ width: 100%; height: 230px; object-fit: cover; display: block; }}
+.lk-polaroid p {{ font-family: 'Caveat', cursive; font-size: 1.5rem; margin: 8px 0 0; text-align: center; color: #2B2B2B; }}
+.lk-polaroid a {{ font-size: .75rem; color: {MUTED} !important; }}
+
+/* passport page: the cities Lark compared */
+.lk-passport {{ background: #FFFFFF; border-radius: 14px; padding: 20px 24px; margin: 6px 0 18px; box-shadow: 0 10px 30px rgba(19,41,75,.12); border-top: 6px solid {BLUE}; }}
+.lk-passport h3 {{ font-size: 1.35rem; font-weight: 800; margin: 0 0 6px; color: {INK}; }}
+.lk-passport > p {{ margin: 0 0 14px; color: {INK}; max-width: 46em; }}
+.lk-stamps {{ display: flex; flex-wrap: wrap; gap: 12px; }}
+.lk-stampbox {{ width: 128px; padding: 10px 8px; border: 2.5px dashed {MUTED}; border-radius: 12px; text-align: center; color: {MUTED}; transform: rotate(-2deg); background: rgba(255,255,255,.85); }}
+.lk-stampbox:nth-child(even) {{ transform: rotate(2deg); }}
+.lk-stampbox b {{ display: block; font-size: 1.02rem; color: {INK}; }}
+.lk-stampbox span {{ font-size: .85rem; }}
+.lk-stampbox.lk-chosen {{ border: 3px solid {RED}; color: {RED}; }}
+.lk-stampbox.lk-chosen b {{ color: {RED}; }}
+.lk-stampbox.lk-nofit {{ opacity: .6; }}
 </style>
 """
 
@@ -264,16 +287,35 @@ def postcard(plan: dict, stay: dict) -> str:
 </div>"""
 
 
-def day_route(plan: dict, day: dict) -> str:
+def weather_chip(sky: dict | None) -> str:
+    if not sky:
+        return ""
+    when = "forecast" if sky.get("kind") == "forecast" else "same dates last year"
+    rain = f", {sky['rain_chance']}% chance of rain" if sky.get("rain_chance") is not None else ""
+    wet = " lk-wet" if sky.get("wet") else ""
+    return (
+        f'<div class="lk-sky{wet}">{escape(sky["summary"])}, {sky["high"]}° / {sky["low"]}°F{rain} '
+        f'<span class="lk-fine">({when})</span></div>'
+    )
+
+
+def day_route(plan: dict, day: dict, sky: dict | None = None, places: dict | None = None) -> str:
     by_name = {a["name"]: a for a in plan["activities"]}
+    places = places or {}
     stops = []
     for item in day["items"]:
         activity = by_name.get(item)
         if activity:
             cost = "Free" if not activity["cost"] else money(activity["cost"])
             url = escape(links.place(activity["name"], activity["area"], plan))
+            spot = places.get(activity["name"]) or {}
+            photo = (
+                f'<img class="lk-stop-photo" src="{escape(spot["photo"])}" alt="{escape(spot["title"])}" loading="lazy">'
+                if spot.get("photo")
+                else ""
+            )
             stops.append(
-                f'<div class="lk-stop"><div class="lk-stop-head"><div><b>{escape(activity["name"])}</b> '
+                f'<div class="lk-stop">{photo}<div class="lk-stop-head"><div><b>{escape(activity["name"])}</b> '
                 f'<span class="lk-area">in {escape(activity["area"])}</span></div><span class="lk-cost">{cost}</span></div>'
                 f'<p>{escape(activity["note"])}</p>'
                 f'<a href="{url}" target="_blank" rel="noopener">Open in Maps</a></div>'
@@ -281,6 +323,48 @@ def day_route(plan: dict, day: dict) -> str:
         else:
             stops.append(f'<div class="lk-stop lk-open"><p>{escape(item)}</p></div>')
     return (
-        f'<div class="lk"><div class="lk-day-title">{escape(day["title"])}</div>'
+        f'<div class="lk"><div class="lk-day-title">{escape(day["title"])}</div>{weather_chip(sky)}'
         f'<div class="lk-route-list">{"".join(stops)}</div></div>'
+    )
+
+
+def polaroid(city: str, photo: dict | None) -> str:
+    if not photo or not photo.get("photo"):
+        return ""
+    credit = (
+        f'<a href="{escape(photo["url"])}" target="_blank" rel="noopener">Photo: Wikipedia</a>' if photo.get("url") else ""
+    )
+    return (
+        f'<div class="lk lk-polaroid"><img src="{escape(photo["photo"])}" alt="{escape(city)}">'
+        f"<p>Greetings from {escape(city)}</p>{credit}</div>"
+    )
+
+
+def passport(plan: dict) -> str:
+    """Why Lark picked this city, and the other cities it priced, as passport stamps."""
+    pick = plan.get("destination_pick")
+    if not pick:
+        return ""
+    stamps = []
+    compared = pick.get("compared", [])
+    # Lark's pick first, then the cheapest of the rest.
+    ordered = [r for r in compared if r["city"] == plan["city"]] + [r for r in compared if r["city"] != plan["city"]]
+    for row in ordered[:6]:
+        classes = "lk-stampbox"
+        if row["city"] == plan["city"]:
+            classes += " lk-chosen"
+        elif not row["fits"]:
+            classes += " lk-nofit"
+        label = "Lark's pick" if row["city"] == plan["city"] else ("Fits" if row["fits"] else "Over budget")
+        stamps.append(
+            f'<div class="{classes}"><b>{escape(row["city"])}</b><span>{money(row["estimated_total"])}</span><br>'
+            f"<span>{label}</span></div>"
+        )
+    runner = f" Runner-up: {escape(pick['runner_up'])}." if pick.get("runner_up") else ""
+    who = "Lark compared every city it knows for your dates and budget" if pick.get("by") == "llm" else "Compared by rule"
+    return (
+        f'<div class="lk lk-passport"><h3>Why {escape(plan["city"])}?</h3>'
+        f'<p>{escape(pick.get("why") or "")}{runner}</p>'
+        f'<div class="lk-stamps">{"".join(stamps)}</div>'
+        f'<p class="lk-fine" style="margin-top:12px">{who}. Totals are estimates before live fares.</p></div>'
     )

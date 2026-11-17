@@ -77,6 +77,7 @@ def blank_state() -> dict:
         "last_surprise": None,
         "unsupported": None,
         "dates_assumed": False,
+        "profile": {},
     }
 
 
@@ -389,7 +390,7 @@ def update_state(state: dict, message: str, today: date | None = None) -> dict:
             state["unsupported"] = ORIGINS[destination]["name"]
             state["destination"] = None
 
-    if re.search(r"\b(anywhere|surprise me|you pick|your pick|you choose)\b", text):
+    if re.search(r"\b(anywhere|surprise me|you pick|your pick|you choose|where (can|should) (i|we) go)\b", text):
         if not destination:
             state["surprise"] = True
             state["destination"] = None
